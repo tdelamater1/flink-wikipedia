@@ -18,19 +18,33 @@
 
 package xyz.delamater;
 
+import com.mongodb.client.model.InsertOneModel;
 import org.apache.flink.api.common.eventtime.WatermarkStrategy;
 
 
 import org.apache.flink.api.common.functions.FilterFunction;
 import org.apache.flink.api.common.functions.MapFunction;
+import org.apache.flink.api.common.state.ValueState;
+import org.apache.flink.api.common.state.ValueStateDescriptor;
 import org.apache.flink.api.java.tuple.Tuple3;
+import org.apache.flink.configuration.Configuration;
+import org.apache.flink.connector.base.DeliveryGuarantee;
 import org.apache.flink.connector.kafka.source.KafkaSource;
 import org.apache.flink.connector.kafka.source.enumerator.initializer.OffsetsInitializer;
 
+import org.apache.flink.connector.mongodb.sink.MongoSink;
 import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.databind.JsonNode;
 import org.apache.flink.streaming.api.datastream.DataStream;
 import org.apache.flink.streaming.api.datastream.DataStreamSource;
+import org.apache.flink.streaming.api.datastream.KeyedStream;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
+import org.apache.flink.streaming.api.functions.KeyedProcessFunction;
+import org.apache.flink.streaming.api.functions.ProcessFunction;
+import org.apache.flink.util.Collector;
+import org.bson.BsonDocument;
+import org.bson.Document;
+
+import javax.xml.crypto.Data;
 
 public class DataStreamJob {
 
@@ -44,9 +58,28 @@ public class DataStreamJob {
                 setBootstrapServers(brokers)
                 .setTopics("wikipedia-events")
                 .setGroupId("consumer-group-1")
-                .setStartingOffsets(OffsetsInitializer.timestamp(1701064800000L))
+                .setStartingOffsets(OffsetsInitializer.earliest())
                 .setValueOnlyDeserializer(new JsonNodeDeserializationSchema())
                 .build();
+
+        String mongoUser = System.getenv("MONGO_USER");
+        String mongoPass = System.getenv("MONGO_PASS");
+
+        System.out.println("mongoUser: " + mongoUser);
+        System.out.println("mongoPass: " + mongoPass);
+
+
+//        MongoSink<Document> sink = MongoSink.<Document>builder()
+//                .setUri("mongodb://" + mongoUser + ":" + mongoPass + "@192.168.4.100:27017/wikipedia")
+//                .setDatabase("wikipedia")
+//                .setCollection("edits")
+//                .setBatchSize(1000)
+//                .setBatchIntervalMs(1000)
+//                .setMaxRetries(3)
+//                .setDeliveryGuarantee(DeliveryGuarantee.AT_LEAST_ONCE)
+//                .setSerializationSchema(
+//                        (input, context) -> new InsertOneModel<>(BsonDocument.parse(input.toJson())))
+//                .build();
 
         DataStreamSource<JsonNode> kafkaSource = env.fromSource(source, WatermarkStrategy.noWatermarks(), "Kafka Source");
 
@@ -62,21 +95,59 @@ public class DataStreamJob {
         // "old_length":126239,
         // "new_length":126151}
 
-        DataStream<JsonNode> humanEdits = kafkaSource.filter(new FilterFunction<JsonNode>() {
+        KeyedStream<JsonNode, String> humanEditsByTitle = kafkaSource.filter(new FilterFunction<JsonNode>() {
             @Override
             public boolean filter(JsonNode jsonNode) {
                 if (jsonNode.get("domain").asText().equals("en.wikipedia.org")
                         && jsonNode.get("user_type").asText().equals("human")
-                        && jsonNode.get("namespace").asText().equals("main namespace")){
+                        && jsonNode.get("namespace").asText().equals("main namespace")) {
                     return true;
                 } else {
                     return false;
                 }
             }
-        });
+        }).keyBy(jsonNode -> jsonNode.get("title").asText());
 
-        // map the json node to a tuple of (user_name, title, 1)
-        humanEdits.map(new Tokenizer()).keyBy(0, 1).sum(2).print();
+        // determine the size of the edit (new_length - old_length) and keep a running total
+        humanEditsByTitle.process(new KeyedProcessFunction<String, JsonNode, Document>() {
+
+            ValueState<Long> totalEditSizeState;
+
+            // we initialize the state in lifecycle method
+            @Override
+            public void open(Configuration parameters) throws Exception {
+                totalEditSizeState = getRuntimeContext()
+                        .getState(new ValueStateDescriptor<>("totalEditSize", Long.class));
+            }
+
+            @Override
+            public void processElement(JsonNode jsonNode, KeyedProcessFunction<String, JsonNode, Document>.Context context, Collector<Document> collector) throws Exception {
+                Long totalEditSize = totalEditSizeState.value();
+                if (totalEditSize == null) {
+                    totalEditSize = 0L;
+                }
+                int oldLength = jsonNode.get("old_length").asInt();
+                int newLength = jsonNode.get("new_length").asInt();
+                int editSize = newLength - oldLength;
+                totalEditSize += editSize;
+                Document doc = new Document();
+                doc.put("title", jsonNode.get("title").asText());
+                doc.put("edit_size", totalEditSize);
+                totalEditSizeState.update(totalEditSize);
+                collector.collect(doc);
+            }
+        }).print();
+
+
+
+//
+//        humanEdits.sinkTo(sink);
+//
+//
+//        // map the json node to a tuple of (user_name, title, 1)
+//        humanEdits.map(new Tokenizer())
+//                .keyBy(0, 1)
+//                .sum(2).print();
 
 
         // Execute program, beginning computation.
