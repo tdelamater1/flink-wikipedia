@@ -18,17 +18,14 @@
 
 package xyz.delamater;
 
-import org.apache.flink.api.common.eventtime.SerializableTimestampAssigner;
 import org.apache.flink.api.common.eventtime.WatermarkStrategy;
 import org.apache.flink.api.common.functions.FilterFunction;
 import org.apache.flink.connector.kafka.source.KafkaSource;
 import org.apache.flink.connector.kafka.source.enumerator.initializer.OffsetsInitializer;
 import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.flink.streaming.api.datastream.DataStream;
-import org.apache.flink.streaming.api.datastream.KeyedStream;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.apache.flink.streaming.api.functions.windowing.ProcessWindowFunction;
-import org.apache.flink.streaming.api.windowing.assigners.TumblingEventTimeWindows;
 import org.apache.flink.streaming.api.windowing.assigners.TumblingProcessingTimeWindows;
 import org.apache.flink.streaming.api.windowing.time.Time;
 import org.apache.flink.streaming.api.windowing.windows.TimeWindow;
@@ -36,9 +33,6 @@ import org.apache.flink.util.Collector;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.text.ParseException;
-import java.text.SimpleDateFormat;
-import java.time.Duration;
 import java.util.HashMap;
 import java.util.Map;
 
@@ -78,7 +72,7 @@ public class DataStreamJob {
 //                .build();
 
         DataStream<EditEvent> kafkaSource = env
-                .fromSource(source, getWatermarkStrategy(), "Kafka Source");
+                .fromSource(source, WatermarkStrategy.noWatermarks(), "Kafka Source");
 
         //{"id":1698671021,
         // "domain":"en.wikipedia.org",
@@ -90,7 +84,7 @@ public class DataStreamJob {
         // "old_length":126239,
         // "new_length":126151}
 
-        KeyedStream<EditEvent, String> editEventStringKeyedStream = kafkaSource.filter(new FilterFunction<EditEvent>() {
+        kafkaSource.filter(new FilterFunction<EditEvent>() {
                     @Override
                     public boolean filter(EditEvent editEvent) throws Exception {
                         if ("human".equalsIgnoreCase(editEvent.getUser_type())
@@ -101,10 +95,7 @@ public class DataStreamJob {
                         }
                     }
                 })
-                .keyBy(editEvent -> editEvent.getDomain());
-
-
-        editEventStringKeyedStream
+                .keyBy(editEvent -> editEvent.getDomain())
                 .window(TumblingProcessingTimeWindows.of(Time.seconds(30)))
                 .process(new ProcessWindowFunction<EditEvent, String, String, TimeWindow>() {
                     @Override
@@ -128,24 +119,4 @@ public class DataStreamJob {
         env.execute("Flink Java API learning");
     }
 
-    private static WatermarkStrategy<EditEvent> getWatermarkStrategy() {
-        return WatermarkStrategy.<EditEvent>forBoundedOutOfOrderness(Duration.ofSeconds(1))
-                .withTimestampAssigner(
-                        new SerializableTimestampAssigner<EditEvent>() {
-                            @Override
-                            public long extractTimestamp(EditEvent editEvent, long l) {
-                                try {
-                                    //"timestamp":"2023-11-27T19:19:29Z"
-                                    //"timestamp": "2023-12-05T00:51:21Z"
-                                    SimpleDateFormat format = new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'");
-                                    return format.parse(editEvent.getTimestamp()).getTime();
-                                    //new Date();
-                                    //LOG.info("Timestamp: {} Now: {}", time, new Date().getTime());
-                                } catch (ParseException e) {
-                                    throw new RuntimeException("Error parsing data for watermark. ", e);
-                                }
-                            }
-                        }
-                );
-    }
 }
